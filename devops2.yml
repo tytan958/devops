@@ -1,0 +1,132 @@
+---
+
+## DevOps CHALLENGE playbook
+
+- hosts: centos 
+  sudo: yes
+  gather_facts: no
+
+# Install httpd openssl and mod_ssl
+
+  tasks:
+    - name: ensure apache is installed
+      yum: pkg=httpd state=latest
+
+    - name: ensure openssl is installed
+      yum: pkg=openssl state=latest
+
+    - name: ensure mod_ssl is installed
+      yum: pkg=mod_ssl state=latest
+
+# Generate ssl certificates and modify ssl.conf file
+# check for ssl.conf file
+    - stat: path=/etc/httpd/conf.d/ssl.conf
+      register: ssl_conf
+
+    - stat: path=/etc/pki/tls/private/ca.csr
+      register: ca_csr
+
+    - stat: path=/etc/pki/tls/private/ca.key
+      register: ca_key
+
+    - name: generate ssl certificates
+      command: "chdir=/etc/httpd/conf.d/ {{ item }}"
+      with_items:
+      - /usr/bin/openssl req -nodes -newkey rsa:2048 -keyout ca.key -out ca.csr -subj "/C=US/ST=NJ/L=Tinton Falls/O=Default Company Ltd/OU=IT Department"
+      - /usr/bin/openssl x509 -req -days 365 -in ca.csr -signkey ca.key -out ca.crt
+      when: (ca_key.stat.exists == False and ca_csr.stat.exists == False)
+
+    - stat: path=/etc/httpd/conf.d/ca.crt
+      register: ca_crt
+
+    - name: copy crt certificates
+      command: mv /etc/httpd/conf.d/ca.crt /etc/pki/tls/certs
+      when: ca_crt.stat.exists == True
+
+    - name: copy ca and key certs
+      command: "mv {{item}} "
+      with_items:
+      - /etc/httpd/conf.d/ca.key /etc/pki/tls/private/ca.key
+      - /etc/httpd/conf.d/ca.csr /etc/pki/tls/private/ca.csr
+      when: (ca_key.stat.exists == False and ca_csr.stat.exists == False)
+
+    - name: modify ssl.conf file
+      lineinfile:
+        dest: /etc/httpd/conf.d/ssl.conf
+        regexp: "{{ item.regexp }}" 
+        line: "{{ item.line }}"
+      with_items:
+        - { regexp: "^SSLCertificateFile", line: "SSLCertificateFile /etc/pki/tls/certs/ca.crt" }
+        - { regexp: "^SSLCertificateKeyFile", line: "SSLCertificateKeyFile /etc/pki/tls/private/ca.key" }
+      when: ssl_conf.stat.exists == True
+
+# Copy index.html template file to remote server 
+
+    - name: deploy website content
+      template: src=templates/index.html.j2 dest=/var/www/html/index.html
+
+# Configure the iptables file
+# check for iptables file
+    - stat: path=/etc/sysconfig/iptables
+      register: iptables_file
+#
+#    - name: iptables_add
+#      iptables: chain={{ item.chain }} protocol={{ item.protocol }} match={{ item.match }} destination_port={{ item.dport }} jump={{ item.jump }}
+#      with_items:
+#        - { chain: INPUT, protocol: tcp, match: tcp, dport: 22, jump: ACCEPT }
+#        - { chain: INPUT, protocol: tcp, match: tcp, dport: 80, jump: ACCEPT }
+#        - { chain: INPUT, protocol: tcp, match: tcp, dport: 443, jump: ACCEPT }
+#      when: iptables_file.stat.exists == True
+####
+# check for iptables file
+    - name: Check if port 22 is allowed
+      shell: iptables -L | grep -q "ssh" && echo -n yes || echo -n no
+      register: check_allow_ssh
+      changed_when: no
+#      always_run: yes
+      check_mode: no
+
+    - name: Check if port 80 is allowed
+      shell: iptables -L | grep -q "http" && echo -n yes || echo -n no
+      register: check_allow_http
+      changed_when: no
+#      always_run: yes    
+      check_mode: no
+
+    - name: Check if port 443 is allowed
+      shell: iptables -L | grep -q "https" && echo -n yes || echo -n no
+      register: check_allow_https
+      changed_when: no
+#      always_run: yes
+      check_mode: no
+
+    - name: Allow port 22
+      iptables: chain={{ item.chain }} protocol={{ item.protocol }} match={{ item.match }} destination_port={{ item.dport }} comment="Allow ssh" jump={{ item.jump }}
+      with_items:
+        - { chain: INPUT, protocol: tcp, match: tcp, dport: 22, jump: ACCEPT }
+      when: (iptables_file.stat.exists == True and check_allow_ssh.stdout == "no")
+
+    - name: Allow port 80
+      iptables: chain={{ item.chain }} protocol={{ item.protocol }} match={{ item.match }} destination_port={{ item.dport }} comment="Allow http" jump={{ item.jump }}
+      with_items:
+        - { chain: INPUT, protocol: tcp, match: tcp, dport: 80, jump: ACCEPT }
+      when: (iptables_file.stat.exists == True and check_allow_http.stdout == "no")
+
+    - name: Allow port 443
+      iptables: chain={{ item.chain }} protocol={{ item.protocol }} match={{ item.match }} destination_port={{ item.dport }} comment="Allow https" jump={{ item.jump }}
+      with_items:
+        - { chain: INPUT, protocol: tcp, match: tcp, dport: 443, jump: ACCEPT }
+      when: (iptables_file.stat.exists == True and check_allow_https.stdout == "no")
+
+# Make iptables persistent
+    - name: make_perm
+      command: service iptables save
+
+
+# Restart iptables and httpd
+
+    - name: restart iptables
+      service: name=iptables state=restarted
+
+    - name: restart apache
+      service: name=httpd state=restarted
